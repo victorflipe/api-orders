@@ -6,6 +6,8 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    # Variables e secrets estão no environment, não no repositório
+    environment: orders-env
 
     services:
       postgres:
