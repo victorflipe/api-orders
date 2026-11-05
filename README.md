@@ -54,6 +54,18 @@ uv run alembic upgrade head
 
 Revise o arquivo gerado antes de aplicar. O autogenerate não cria o tipo `ENUM` do Postgres em `add_column` nem dá nome a constraints únicas.
 
+## Testes
+
+```bash
+docker compose up -d postgres
+cd api
+uv run pytest
+```
+
+Os testes rodam contra o Postgres real, mas em um banco separado (`<POSTGRES_DB>_test`), criado automaticamente. O banco de desenvolvimento não é tocado: o conftest recusa qualquer nome que não termine em `_test`. O RabbitMQ é substituído por um coletor em memória, então só o Postgres precisa estar no ar.
+
+Usar o Postgres (e não SQLite) é intencional: o teste de corrida depende da restrição `UNIQUE` e do `IntegrityError` reais. O teste `test_concurrent_requests_with_same_key_create_one_order` reproduz o cenário descrito em [Decisões técnicas](#decisões-técnicas): 10 requisições simultâneas com a mesma chave devem resultar em um `201`, nove `200`, uma única linha no banco e um único evento publicado.
+
 ## Endpoints
 
 | Método | Rota | Descrição |
