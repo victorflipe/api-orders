@@ -44,3 +44,5 @@ class OrderModel(Base):
     created_at: Mapped[datetime] = mapped_column(server_default=func.now())
     # NULL é permitido várias vezes sob UNIQUE no Postgres (pedidos sem chave)
     idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True)
+    # SHA-256 do corpo normalizado; detecta reuso da chave com outro corpo
+    request_hash: Mapped[str | None] = mapped_column(String(64))
