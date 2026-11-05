@@ -28,7 +28,8 @@ async def connect() -> None:
     _exchange = await channel.declare_exchange(
         EXCHANGE_NAME, ExchangeType.TOPIC, durable=True
     )
-
+    queue = await channel.declare_queue("orders.created", durable=True)
+    await queue.bind(_exchange, routing_key="order.created")
 
 async def close() -> None:
     global _connection, _exchange
