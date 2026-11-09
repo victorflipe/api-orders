@@ -66,6 +66,8 @@ uv run pytest
 
 Os testes rodam contra o Postgres real, mas em um banco separado (`<POSTGRES_DB>_test`), criado automaticamente. O banco de desenvolvimento não é tocado: o conftest recusa qualquer nome que não termine em `_test`. O RabbitMQ é substituído por um coletor em memória, então só o Postgres precisa estar no ar.
 
+O esquema do banco de teste vem das migrations: a cada execução o schema é zerado e o `alembic upgrade head` roda uma vez, o mesmo caminho de produção, em vez de `create_all`. Assim uma migration quebrada derruba a suíte. O teste `test_migrations_match_the_models` também falha se um modelo mudou sem a migration correspondente.
+
 Usar o Postgres (e não SQLite) é intencional: o teste de corrida depende da restrição `UNIQUE` e do `IntegrityError` reais. O teste `test_concurrent_requests_with_same_key_create_one_order` reproduz o cenário descrito em [Decisões técnicas](#decisões-técnicas): 10 requisições simultâneas com a mesma chave devem resultar em um `201`, nove `200`, uma única linha no banco e um único evento publicado.
 
 ### Integração contínua

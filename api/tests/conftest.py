@@ -2,13 +2,19 @@
 
 Os testes usam o Postgres real (a corrida depende da UNIQUE do Postgres), mas
 num banco separado `<banco>_test`, criado sob demanda. O banco de desenvolvimento
-nunca é tocado. O RabbitMQ é trocado por um coletor em memória.
+nunca é tocado. O esquema vem das migrations (`alembic upgrade head`), o mesmo
+caminho de produção, e não de `create_all`. O RabbitMQ é trocado por um coletor
+em memória.
 """
 
+import asyncio
 import os
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
+from alembic import command
+from alembic.config import Config
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -17,21 +23,20 @@ from sqlalchemy.pool import NullPool
 
 import database
 import main
-from database import Base
+
+ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
 
 def _database_urls():
     base = make_url(database.DATABASE_URL)
     test_name = os.environ.get("TEST_DATABASE_NAME", f"{base.database}_test")
-    # Trava de segurança: create_all/drop_all nunca podem rodar no banco real
+    # Trava de segurança: o esquema do banco de testes é apagado a cada execução
     assert test_name.endswith("_test"), "o banco de testes deve terminar em _test"
     return base.set(database="postgres"), base.set(database=test_name)
 
 
-@pytest_asyncio.fixture
-async def engine():
-    admin_url, test_url = _database_urls()
-
+async def _reset_database(admin_url, test_url) -> None:
+    """Cria o banco de testes se faltar e zera o esquema `public`."""
     admin = create_async_engine(admin_url, isolation_level="AUTOCOMMIT", poolclass=NullPool)
     async with admin.connect() as conn:
         exists = await conn.scalar(
@@ -42,13 +47,37 @@ async def engine():
             await conn.execute(text(f'CREATE DATABASE "{test_url.database}"'))
     await admin.dispose()
 
-    # NullPool: cada conexão pertence ao event loop do teste que a abriu
     eng = create_async_engine(test_url, poolclass=NullPool)
     async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield eng
+        # Um comando por execução: o asyncpg não aceita vários em um só
+        await conn.execute(text("DROP SCHEMA public CASCADE"))
+        await conn.execute(text("CREATE SCHEMA public"))
+    await eng.dispose()
+
+
+@pytest.fixture(scope="session")
+def migrated_database():
+    """Aplica `alembic upgrade head` uma vez por execução, num banco zerado.
+
+    É uma fixture síncrona de propósito: o env.py do Alembic chama
+    asyncio.run(), que não pode rodar dentro de um event loop já ativo.
+    """
+    admin_url, test_url = _database_urls()
+    asyncio.run(_reset_database(admin_url, test_url))
+
+    config = Config(str(ALEMBIC_INI))
+    config.attributes["url"] = test_url.render_as_string(hide_password=False)
+    command.upgrade(config, "head")
+    return test_url
+
+
+@pytest_asyncio.fixture
+async def engine(migrated_database):
+    # NullPool: cada conexão pertence ao event loop do teste que a abriu
+    eng = create_async_engine(migrated_database, poolclass=NullPool)
     async with eng.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
+        await conn.execute(text("TRUNCATE orders RESTART IDENTITY"))
+    yield eng
     await eng.dispose()
 
 
