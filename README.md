@@ -2,7 +2,7 @@
 
 [![Tests](https://github.com/victorflipe/api-orders/actions/workflows/tests.yml/badge.svg)](https://github.com/victorflipe/api-orders/actions/workflows/tests.yml)
 
-API de pedidos em FastAPI. Cada pedido é gravado no PostgreSQL e, depois do commit, o evento `order.created` é publicado no RabbitMQ.
+API de pedidos em FastAPI. Cada pedido é gravado no PostgreSQL e, depois do commit, o evento `order.created` é publicado no RabbitMQ. Um worker consome o evento e muda o pedido de `pending` para `paid`.
 
 ## Arquitetura
 
@@ -12,12 +12,14 @@ flowchart LR
     API -->|SQLAlchemy async + Alembic| PG[(PostgreSQL)]
     API -->|aio-pika: order.created| EX{{exchange orders<br/>topic}}
     EX -->|binding order.created| Q[[fila orders.created]]
-    Q -.->|consumers futuros| CONS[Consumers]
+    Q -->|ack manual| W[Worker]
+    W -->|pending → paid + processed_events<br/>na mesma transação| PG
 ```
 
 | Serviço | Porta | Observação |
 |---|---|---|
 | API | 8000 | Documentação interativa em `/docs` |
+| Worker | n/a | Consome `orders.created`; logs com `docker compose logs -f worker` |
 | PostgreSQL 16 | 5432 | Dados no volume `postgres_data` |
 | RabbitMQ 4 | 5672 / 15672 | Painel de administração em `http://localhost:15672` |
 
@@ -32,7 +34,7 @@ cp .env.example .env      # preencha usuários e senhas
 docker compose up --build
 ```
 
-A API só inicia depois que o Postgres e o RabbitMQ passam no healthcheck. Ao subir, o container executa `alembic upgrade head` antes de iniciar o servidor.
+A API só inicia depois que o Postgres e o RabbitMQ passam no healthcheck. Ao subir, o container executa `alembic upgrade head` antes de iniciar o servidor. O worker espera a API ficar saudável (o que garante que as migrations já rodaram).
 
 ### API local, infraestrutura no Docker
 
@@ -42,6 +44,8 @@ cd api
 uv sync
 uv run alembic upgrade head
 uv run fastapi dev main.py
+# em outro terminal, para consumir os eventos:
+uv run python worker.py
 ```
 
 O `.env` da raiz tem `DATABASE_URL` e `RABBITMQ_URL` com host `localhost` para esse modo. No Docker, o `docker-compose.yml` sobrescreve os dois com os nomes dos serviços (`postgres` e `rabbitmq`). Se a senha tiver caracteres especiais (`@`, `:`, `/`), ela precisa de URL-encoding dentro dessas URLs.
@@ -64,7 +68,7 @@ cd api
 uv run pytest
 ```
 
-Os testes rodam contra o Postgres real, mas em um banco separado (`<POSTGRES_DB>_test`), criado automaticamente. O banco de desenvolvimento não é tocado: o conftest recusa qualquer nome que não termine em `_test`. O RabbitMQ é substituído por um coletor em memória, então só o Postgres precisa estar no ar.
+Os testes rodam contra o Postgres real, mas em um banco separado (`<POSTGRES_DB>_test`), criado automaticamente. O banco de desenvolvimento não é tocado: o conftest recusa qualquer nome que não termine em `_test`. O RabbitMQ é substituído por um coletor em memória e o worker é testado com mensagens simuladas (`test_worker.py`), então só o Postgres precisa estar no ar.
 
 O esquema do banco de teste vem das migrations: a cada execução o schema é zerado e o `alembic upgrade head` roda uma vez, o mesmo caminho de produção, em vez de `create_all`. Assim uma migration quebrada derruba a suíte. O teste `test_migrations_match_the_models` também falha se um modelo mudou sem a migration correspondente.
 
@@ -105,7 +109,18 @@ Publicado na exchange `orders` (tipo `topic`, durável) com a routing key `order
 {"id": 1, "product": "camiseta", "value": "49.90", "status": "pending", "created_at": "2026-11-05T19:09:31.200134"}
 ```
 
-A API declara também a fila durável `orders.created`, ligada a essa routing key. Uma exchange `topic` sem fila ligada descarta as mensagens sem aviso. Cada consumer futuro deve declarar a própria fila.
+A API declara também a fila durável `orders.created`, ligada a essa routing key. Uma exchange `topic` sem fila ligada descarta as mensagens sem aviso. Cada consumer adicional deve declarar a própria fila.
+
+## Worker (consumer)
+
+[`api/worker.py`](api/worker.py) consome `orders.created` com ack manual e `prefetch_count=10`. Para cada mensagem:
+
+1. Abre **uma transação** que insere o `message_id` em `processed_events` (chave primária, `ON CONFLICT DO NOTHING`) e faz `UPDATE orders SET status='paid' WHERE id=… AND status='pending'`.
+2. Só **depois do commit** dá o `ack`.
+
+Resultados possíveis: pedido atualizado; pedido inexistente ou já adiante (`shipped`, `cancelled`), que registra o evento, avisa no log e confirma sem alterar nada; mensagem repetida, que só confirma. Se o banco falhar, a transação desfaz tudo (inclusive o registro em `processed_events`) e a mensagem volta para a fila com `nack(requeue=True)`. Mensagem inválida (sem `message_id`, JSON quebrado, sem `id`) é rejeitada sem voltar à fila.
+
+Limitação: não há *dead-letter queue*. Mensagem inválida é descartada, e um erro permanente do banco faz a mensagem voltar para a fila em ciclo (com pausa de 1 s) até o problema ser resolvido.
 
 ## Decisões técnicas
 
@@ -140,6 +155,9 @@ Limitação conhecida (*dual write*): gravar no banco e publicar no broker são 
 O retry não corrige isso: reenviar a requisição com a mesma `Idempotency-Key` recebe `200` com o pedido original e o evento **não é republicado**, porque a chave já existe e só o caminho de criação publica. O cliente vê sucesso nas duas respostas, e o consumidor nunca fica sabendo do pedido.
 
 A solução completa é o padrão *transactional outbox* (gravar o evento numa tabela na mesma transação do pedido e publicar por um worker, com nova tentativa até confirmar), que não foi implementado.
+
+### Consumer idempotente
+O RabbitMQ garante entrega *pelo menos uma vez*: se o worker cair depois do commit e antes do ack, a mensagem é reentregue. Por isso o `message_id` (o id do pedido, definido pelo publicador) é gravado em `processed_events` na **mesma transação** do `UPDATE`. A segunda entrega encontra o id, não executa o `UPDATE` e só dá o ack. Gravar fora da transação deixaria uma janela em que o evento é marcado sem o pedido ter mudado, ou o contrário. Entregas simultâneas da mesma mensagem esperam uma pela outra na chave primária e só uma passa.
 
 ### Pedidos anteriores ao hash
 Pedidos criados com chave antes da coluna `request_hash` existir tiveram o hash calculado na própria migration. Um pedido com chave e sem hash voltaria a devolver o original sem comparar o corpo.

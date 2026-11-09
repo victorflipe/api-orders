@@ -14,9 +14,20 @@ logger = logging.getLogger(__name__)
 
 EXCHANGE_NAME = "orders"
 ORDER_CREATED_KEY = "order.created"
+QUEUE_NAME = "orders.created"
 
 _connection: aio_pika.abc.AbstractRobustConnection | None = None
 _exchange: aio_pika.abc.AbstractExchange | None = None
+
+
+async def declare_topology(channel):
+    """Declara exchange, fila e binding. Idempotente: API e worker chamam."""
+    exchange = await channel.declare_exchange(
+        EXCHANGE_NAME, ExchangeType.TOPIC, durable=True
+    )
+    queue = await channel.declare_queue(QUEUE_NAME, durable=True)
+    await queue.bind(exchange, routing_key=ORDER_CREATED_KEY)
+    return exchange, queue
 
 
 async def connect() -> None:
@@ -25,11 +36,7 @@ async def connect() -> None:
         os.environ["RABBITMQ_URL"], timeout=5
     )
     channel = await _connection.channel()
-    _exchange = await channel.declare_exchange(
-        EXCHANGE_NAME, ExchangeType.TOPIC, durable=True
-    )
-    queue = await channel.declare_queue("orders.created", durable=True)
-    await queue.bind(_exchange, routing_key="order.created")
+    _exchange, _ = await declare_topology(channel)
 
 async def close() -> None:
     global _connection, _exchange

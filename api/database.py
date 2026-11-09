@@ -46,3 +46,12 @@ class OrderModel(Base):
     idempotency_key: Mapped[str | None] = mapped_column(String(255), unique=True)
     # SHA-256 do corpo normalizado; detecta reuso da chave com outro corpo
     request_hash: Mapped[str | None] = mapped_column(String(64))
+
+
+class ProcessedEvent(Base):
+    """Eventos já tratados pelo consumer. O message_id como chave primária
+    impede que a mesma mensagem seja aplicada duas vezes."""
+
+    __tablename__ = "processed_events"
+    message_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    processed_at: Mapped[datetime] = mapped_column(server_default=func.now())
