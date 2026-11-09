@@ -106,6 +106,7 @@ async def create_order(
     except IntegrityError:
         # Requisições simultâneas com a mesma chave: a UNIQUE do banco decide
         await session.rollback()
+        logger.info("Corrida de idempotência: UNIQUE rejeitou a chave %r", idempotency_key)
         if not idempotency_key:
             raise
         existing = await find_by_key()

@@ -1,7 +1,36 @@
 import asyncio
+import logging
 from collections import Counter
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 BODY = {"product": "camiseta", "value": "49.90"}
+RACE_LOG = "Corrida de idempotência"
+
+
+def hold_commits_until_all_checked(monkeypatch, parties: int) -> None:
+    """Faz as `parties` requisições chegarem juntas ao commit.
+
+    Sem isso a corrida é só provável: se a primeira requisição der commit antes
+    de as outras fazerem a pré-consulta, as demais encontram a chave e nunca
+    chegam ao IntegrityError (o teste passaria sem testar a UNIQUE). Com a
+    barreira, todas já viram "chave inexistente" antes de qualquer insert. Se
+    as requisições não rodarem de fato em paralelo (ex.: pool de 1 conexão), a
+    barreira estoura por timeout e o teste falha em vez de passar em falso.
+    """
+    barrier = asyncio.Barrier(parties)
+    original_commit = AsyncSession.commit
+
+    async def commit(self):
+        await asyncio.wait_for(barrier.wait(), timeout=5)
+        return await original_commit(self)
+
+    monkeypatch.setattr(AsyncSession, "commit", commit)
+
+
+def race_hits(caplog) -> int:
+    """Quantas requisições caíram no ramo do IntegrityError."""
+    return sum(RACE_LOG in message for message in caplog.messages)
 
 
 def key(value: str) -> dict:
@@ -9,13 +38,20 @@ def key(value: str) -> dict:
 
 
 async def test_concurrent_requests_with_same_key_create_one_order(
-    client, published, count_orders
+    client, published, count_orders, caplog, monkeypatch
 ):
     """Cenário do README: 10 requisições simultâneas com a mesma chave
     resultam em um 201, nove 200 e uma única linha no banco."""
-    responses = await asyncio.gather(
-        *[client.post("/orders", json=BODY, headers=key("race-1")) for _ in range(10)]
-    )
+    hold_commits_until_all_checked(monkeypatch, parties=10)
+    with caplog.at_level(logging.INFO, logger="main"):
+        responses = await asyncio.gather(
+            *[client.post("/orders", json=BODY, headers=key("race-1")) for _ in range(10)]
+        )
+
+    # Prova de que a corrida aconteceu: pelo menos uma requisição passou da
+    # pré-consulta e foi barrada pela UNIQUE. Sem isso, o teste passaria mesmo
+    # com as requisições rodando uma por vez (ex.: pool de conexões de 1).
+    assert race_hits(caplog) >= 1, "nenhuma requisição chegou ao IntegrityError"
 
     assert Counter(r.status_code for r in responses) == {201: 1, 200: 9}
     assert len({r.json()["id"] for r in responses}) == 1
@@ -67,16 +103,20 @@ async def test_same_key_with_different_body_is_rejected(client, count_orders):
 
 
 async def test_concurrent_requests_with_same_key_and_different_bodies(
-    client, count_orders
+    client, count_orders, caplog, monkeypatch
 ):
     """Na corrida, quem vence cria o pedido; os de corpo diferente recebem 422."""
+    hold_commits_until_all_checked(monkeypatch, parties=10)
     requests = [
         client.post(
             "/orders", json={**BODY, "value": str(10 + i % 2)}, headers=key("race-2")
         )
         for i in range(10)
     ]
-    responses = await asyncio.gather(*requests)
+    with caplog.at_level(logging.INFO, logger="main"):
+        responses = await asyncio.gather(*requests)
+
+    assert race_hits(caplog) >= 1, "nenhuma requisição chegou ao IntegrityError"
 
     statuses = Counter(r.status_code for r in responses)
     assert statuses[201] == 1
