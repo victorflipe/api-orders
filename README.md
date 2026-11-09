@@ -1,5 +1,7 @@
 # api-orders
 
+[![Tests](https://github.com/victorflipe/api-orders/actions/workflows/tests.yml/badge.svg)](https://github.com/victorflipe/api-orders/actions/workflows/tests.yml)
+
 API de pedidos em FastAPI. Cada pedido é gravado no PostgreSQL e, depois do commit, o evento `order.created` é publicado no RabbitMQ.
 
 ## Arquitetura
@@ -68,7 +70,8 @@ Usar o Postgres (e não SQLite) é intencional: o teste de corrida depende da re
 
 ### Integração contínua
 
-O workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda `uv run pytest` a cada `push`, com um serviço Postgres. 
+O workflow [`.github/workflows/tests.yml`](.github/workflows/tests.yml) roda `uv run pytest` a cada `push` e em todo `pull_request`, com um serviço `postgres:16-alpine`. Não precisa de configuração no GitHub: as credenciais do Postgres de teste (`postgres` / `postgres`) são fixas no workflow, porque o banco existe só durante o job, sem acesso externo, e PRs vindos de forks não recebem secrets do repositório.
+
 ## Endpoints
 
 | Método | Rota | Descrição |

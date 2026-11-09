@@ -2,20 +2,21 @@ name: Tests
 
 on:
   push:
+  pull_request:
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    # Variables e secrets estão no environment, não no repositório
-    environment: orders-env
 
     services:
       postgres:
         image: postgres:16-alpine
+        # Credenciais fixas de propósito: o banco existe só dentro do job, sem
+        # acesso externo, e PRs de forks não recebem secrets do repositório.
         env:
-          POSTGRES_DB: ${{ vars.POSTGRES_DB }}
-          POSTGRES_USER: ${{ vars.POSTGRES_USER }}
-          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: orders_db
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
         ports:
           - 5432:5432
         options: >-
@@ -25,8 +26,8 @@ jobs:
           --health-retries 10
 
     env:
-      # Os testes criam o banco <POSTGRES_DB>_test sob demanda neste mesmo servidor
-      DATABASE_URL: postgresql://${{ vars.POSTGRES_USER }}:${{ secrets.POSTGRES_PASSWORD }}@localhost:5432/${{ vars.POSTGRES_DB }}
+      # Os testes criam o banco orders_db_test sob demanda neste mesmo servidor
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/orders_db
 
     defaults:
       run:
