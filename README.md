@@ -135,7 +135,11 @@ Em um teste com 10 requisições simultâneas na mesma chave, houve um `201`, no
 ### Publicação do evento depois do commit
 O evento é publicado depois do commit e só na criação (repetições idempotentes não republicam). Se o RabbitMQ estiver indisponível, o pedido é criado mesmo assim e o erro é logado: o pedido é a fonte da verdade, e a conexão se recupera sozinha quando o broker volta.
 
-Limitação conhecida: se a API cair entre o commit e a publicação, ou o broker estiver fora naquele momento, o evento daquele pedido se perde. A solução completa é o padrão *transactional outbox* (gravar o evento numa tabela na mesma transação e publicar por um worker), que não foi implementado.
+Limitação conhecida (*dual write*): gravar no banco e publicar no broker são duas operações sem transação em comum. Se a API cair entre o commit e a publicação, ou o broker estiver fora naquele momento, o pedido existe, mas o evento daquele pedido se perde.
+
+O retry não corrige isso: reenviar a requisição com a mesma `Idempotency-Key` recebe `200` com o pedido original e o evento **não é republicado**, porque a chave já existe e só o caminho de criação publica. O cliente vê sucesso nas duas respostas, e o consumidor nunca fica sabendo do pedido.
+
+A solução completa é o padrão *transactional outbox* (gravar o evento numa tabela na mesma transação do pedido e publicar por um worker, com nova tentativa até confirmar), que não foi implementado.
 
 ### Pedidos anteriores ao hash
 Pedidos criados com chave antes da coluna `request_hash` existir tiveram o hash calculado na própria migration. Um pedido com chave e sem hash voltaria a devolver o original sem comparar o corpo.
