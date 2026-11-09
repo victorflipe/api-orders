@@ -23,6 +23,7 @@ from sqlalchemy.pool import NullPool
 
 import database
 import main
+from database import Base
 
 ALEMBIC_INI = Path(__file__).resolve().parent.parent / "alembic.ini"
 
@@ -71,12 +72,29 @@ def migrated_database():
     return test_url
 
 
+def _truncate_statement(preparer) -> str | None:
+    """TRUNCATE de todas as tabelas dos modelos, para não precisar listar uma a
+    uma. A tabela de controle do Alembic nunca entra: apagá-la faria o próximo
+    `upgrade` recriar tudo. Só enxerga tabelas registradas no `Base.metadata`.
+    """
+    names = [
+        preparer.quote(table.name)
+        for table in Base.metadata.sorted_tables
+        if table.name != "alembic_version"
+    ]
+    if not names:
+        return None
+    return f"TRUNCATE {', '.join(names)} RESTART IDENTITY CASCADE"
+
+
 @pytest_asyncio.fixture
 async def engine(migrated_database):
     # NullPool: cada conexão pertence ao event loop do teste que a abriu
     eng = create_async_engine(migrated_database, poolclass=NullPool)
-    async with eng.begin() as conn:
-        await conn.execute(text("TRUNCATE orders RESTART IDENTITY"))
+    statement = _truncate_statement(eng.dialect.identifier_preparer)
+    if statement:
+        async with eng.begin() as conn:
+            await conn.execute(text(statement))
     yield eng
     await eng.dispose()
 
